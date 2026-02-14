@@ -647,38 +647,80 @@ const MiscView = Vue.component("ti-misc", {
     groupedChanges() {
       const good = this.diffChanges.filter((c) => c.classification === "good");
       const bad = this.diffChanges.filter((c) => c.classification === "bad");
+      const settings = this.diffChanges.filter((c) => c.classification === "settings" || c.classification === "neutral");
 
-      const sortChanges = (changes) => {
+      const sortSettings = (changes) => {
         return [...changes].sort((a, b) => {
-          // 1. Percentage changes first
-          if (a.isPercentChange && !b.isPercentChange) return -1;
-          if (!a.isPercentChange && b.isPercentChange) return 1;
-
-          if (a.isPercentChange && b.isPercentChange) {
-            // Sorted by % change descending
-            return (b.percentChange || 0) - (a.percentChange || 0);
-          }
-
-          // 2. Enabled changes next
-          const isEnabledChange = (c) => c.setting.toLowerCase().endsWith(".enabled");
-          const aEnabled = isEnabledChange(a);
-          const bEnabled = isEnabledChange(b);
-          if (aEnabled && !bEnabled) return -1;
-          if (!aEnabled && bEnabled) return 1;
-
-          if (aEnabled && bEnabled) {
-            // Starting by enabled yes (new value is true)
-            if (a.newValue === true && b.newValue !== true) return -1;
-            if (a.newValue !== true && b.newValue === true) return 1;
-          }
-
+          const setA = a.setting.toLowerCase();
+          const setB = b.setting.toLowerCase();
+          if (setA < setB) return -1;
+          if (setA > setB) return 1;
           return 0;
         });
       };
 
+      const sortOutcomes = (changes) => {
+        // 1. Group by Outcome Name
+        const groups = {};
+        changes.forEach((c) => {
+          const parts = c.setting.split(".");
+          let outcomeName = "";
+          if (parts[0] === "outcomes") outcomeName = parts[1];
+          else if (parts[0] === "noita" && parts[1] === "option_types") outcomeName = parts[2];
+          else outcomeName = c.setting;
+
+          if (!groups[outcomeName]) groups[outcomeName] = [];
+          groups[outcomeName].push(c);
+        });
+
+        // 2. Score groups
+        const groupScores = Object.entries(groups).map(([name, groupChanges]) => {
+          let maxChange = 0;
+          groupChanges.forEach((c) => {
+            // Score by rarity percent change magnitude
+            if (c.setting.toLowerCase().endsWith("rarity") && c.percentChange) {
+              const absChange = Math.abs(c.percentChange);
+              if (absChange > maxChange) maxChange = absChange;
+            }
+          });
+          return { name, changes: groupChanges, score: maxChange };
+        });
+
+        // 3. Sort groups (Score desc, then Name asc)
+        groupScores.sort((a, b) => {
+          if (b.score !== a.score) return b.score - a.score;
+          return a.name.localeCompare(b.name);
+        });
+
+        // 4. Flatten
+        return groupScores.flatMap((g) => {
+          // Sort changes within outcome by specific priority:
+          // 1. Name, 2. Enabled, 3. Rarity (Probability), 4. Description, 5. Comment
+          g.changes.sort((a, b) => {
+            const getPriority = (setting) => {
+              const lower = setting.toLowerCase();
+              if (lower.endsWith(".name")) return 1;
+              if (lower.endsWith(".enabled")) return 2;
+              if (lower.endsWith(".rarity")) return 3;
+              if (lower.endsWith(".description")) return 4;
+              if (lower.endsWith(".comment")) return 5;
+              return 6;
+            };
+
+            const pA = getPriority(a.setting);
+            const pB = getPriority(b.setting);
+
+            if (pA !== pB) return pA - pB;
+            return a.setting.localeCompare(b.setting);
+          });
+          return g.changes;
+        });
+      };
+
       return {
-        good: sortChanges(good),
-        bad: sortChanges(bad),
+        good: sortOutcomes(good),
+        bad: sortOutcomes(bad),
+        settings: sortSettings(settings),
       };
     },
   },
@@ -729,7 +771,8 @@ const MiscView = Vue.component("ti-misc", {
       const changes = [];
 
       const getOutcomeClassification = (type) => {
-        if (type === "good_effects" || type === "helpful") return "good";
+        const good = ["good_effects", "helpful"];
+        if (good.includes(type)) return "good";
         return "bad";
       };
 
@@ -737,19 +780,45 @@ const MiscView = Vue.component("ti-misc", {
         const fullPath = currentPath ? `${currentPath}.${key}` : key;
         const parts = fullPath.split(".");
 
-        let classification = "neutral";
+        let classification = "settings";
         let outcomeType = null;
         if (parts[0] === "outcomes") {
           outcomeType = importData.type || (currentData ? currentData.type : null);
           classification = getOutcomeClassification(outcomeType);
-        } else if (parts[0] === "noita" && parts[1] === "option_types" && parts.length > 2) {
-          outcomeType = importData.name || (currentData ? currentData.name : null);
-          classification = getOutcomeClassification(outcomeType);
+        } else if (parts[0] === "noita") {
+          classification = "settings";
+          if (parts[1] === "option_types" && parts.length > 2) {
+            outcomeType = importData.name || (currentData ? currentData.name : null);
+            if (!outcomeType) {
+              outcomeType = parts[2];
+            }
+            // Keep outcome classification if we can determine it, otherwise settings
+            if (outcomeType) {
+              classification = getOutcomeClassification(outcomeType);
+            }
+          }
         }
 
         if (typeof oldVal === "object" && oldVal !== null && typeof newVal === "object" && newVal !== null) {
           if (Array.isArray(oldVal) && Array.isArray(newVal)) {
-            if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
+            const isNamedArray =
+              oldVal.length > 0 &&
+              newVal.length > 0 &&
+              oldVal.every((x) => x && typeof x === "object" && "name" in x) &&
+              newVal.every((x) => x && typeof x === "object" && "name" in x);
+            const isOptionTypes = parts[1] === "option_types" && parts[0] === "noita";
+
+            if (isNamedArray || isOptionTypes) {
+              const oldMap = {};
+              oldVal.forEach((x) => {
+                if (x && x.name) oldMap[x.name] = x;
+              });
+              const newMap = {};
+              newVal.forEach((x) => {
+                if (x && x.name) newMap[x.name] = x;
+              });
+              changes.push(...this.compareSettings(oldMap, newMap, fullPath));
+            } else if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
               changes.push({
                 setting: fullPath,
                 oldValue: JSON.stringify(oldVal),
@@ -782,6 +851,7 @@ const MiscView = Vue.component("ti-misc", {
 
       const allKeys = new Set([...Object.keys(currentData || {}), ...Object.keys(importData || {})]);
       for (const key of allKeys) {
+        if (key === "uid") continue;
         const oldVal = currentData ? currentData[key] : undefined;
         const newVal = importData ? importData[key] : undefined;
 
@@ -789,6 +859,7 @@ const MiscView = Vue.component("ti-misc", {
           const fullPath = path ? `${path}.${key}` : key;
           const parts = fullPath.split(".");
           let classification = "neutral";
+          if (parts[0] === "noita") classification = "settings";
           let outcomeType = null;
           if (parts[0] === "outcomes") {
             outcomeType = importData.type || (typeof newVal === "object" ? newVal.type : null);
@@ -808,6 +879,7 @@ const MiscView = Vue.component("ti-misc", {
           const fullPath = path ? `${path}.${key}` : key;
           const parts = fullPath.split(".");
           let classification = "neutral";
+          if (parts[0] === "noita") classification = "settings";
           let outcomeType = null;
           if (parts[0] === "outcomes") {
             outcomeType = currentData.type || (typeof oldVal === "object" ? oldVal.type : null);
@@ -830,6 +902,8 @@ const MiscView = Vue.component("ti-misc", {
       return changes;
     },
     formatValue(val) {
+      if (val === "") return "(empty)";
+      if (val === null || val === undefined) return "(none)";
       if (typeof val === "boolean") return val ? "Yes" : "No";
       if (typeof val === "object") return JSON.stringify(val);
       return String(val);
@@ -867,9 +941,17 @@ const MiscView = Vue.component("ti-misc", {
         const outcomeName = parts[1];
         const property = parts.length > 2 ? formatPart(parts[parts.length - 1]) : "";
         return property ? `${outcomeName} → ${property}` : outcomeName;
-      } else if (parts[0] === "noita" && parts.length >= 2) {
-        const property = formatPart(parts[parts.length - 1]);
-        return `Noita → ${property}`;
+      } else if (parts[0] === "noita") {
+        if (parts[1] === "option_types" && parts.length >= 3) {
+          const category = formatPart(parts[2]);
+          if (parts.length === 3) return `Noita → Option Types → ${category}`;
+          const property = formatPart(parts[parts.length - 1]);
+          return `Noita → Option Types → ${category} → ${property}`;
+        }
+        if (parts.length >= 2) {
+          const property = formatPart(parts[parts.length - 1]);
+          return `Noita → ${property}`;
+        }
       }
 
       return parts.map(formatPart).join(" → ");
@@ -883,8 +965,11 @@ const MiscView = Vue.component("ti-misc", {
       if (typeof val === "boolean") {
         if (change.classification === "good") {
           return val ? "green--text" : "red--text";
-        } else {
+        } else if (change.classification === "bad") {
           return val ? "red--text" : "green--text";
+        } else {
+          // Settings / Neutral
+          return val ? "green--text" : "orange--text";
         }
       }
 
@@ -892,8 +977,12 @@ const MiscView = Vue.component("ti-misc", {
         const isPositive = change.percentChange > 0;
         if (change.classification === "bad") {
           return isPositive ? "red--text" : "green--text";
+        } else if (change.classification === "good") {
+          return isPositive ? "green--text" : "red--text";
+        } else {
+          // Settings / Neutral
+          return isPositive ? "green--text" : "orange--text";
         }
-        return isPositive ? "green--text" : "red--text";
       }
       return "";
     },
@@ -926,13 +1015,6 @@ const MiscView = Vue.component("ti-misc", {
             const currentOutcome = currentOutcomes.data[id];
             if (currentOutcome) {
               this.diffChanges.push(...this.compareSettings(currentOutcome, outcome, `outcomes.${outcome.name || id}`));
-            } else {
-              this.diffChanges.push({
-                setting: `outcomes.${outcome.name || id}`,
-                oldValue: "(not set)",
-                newValue: "(new outcome)",
-                isNew: true,
-              });
             }
           }
         }
@@ -977,12 +1059,22 @@ const MiscView = Vue.component("ti-misc", {
           imported.push("Noita settings");
         }
         if (data.outcomes) {
+          const currentOutcomesRes = await axios.get("/outcomes");
+          const currentOutcomes = currentOutcomesRes.data;
           const outcomeIds = Object.keys(data.outcomes);
+          let skipped = 0;
+
           for (let i = 0; i < outcomeIds.length; i++) {
+            const id = outcomeIds[i];
+            if (!currentOutcomes[id]) {
+              skipped++;
+              continue;
+            }
             this.importStatus = `Importing Outcomes (${i + 1}/${outcomeIds.length})...`;
-            await axios.post(`/outcomes/${outcomeIds[i]}`, data.outcomes[outcomeIds[i]]);
+            await axios.post(`/outcomes/${id}`, data.outcomes[id]);
           }
-          imported.push(`${outcomeIds.length} outcomes`);
+          imported.push(`${outcomeIds.length - skipped} outcomes`);
+          if (skipped > 0) imported.push(`${skipped} skipped`);
         }
         this.snackbar.text = `Import successful: ${imported.join(", ")}`;
         this.snackbar.show = true;
@@ -1000,22 +1092,48 @@ const MiscView = Vue.component("ti-misc", {
           <v-snackbar v-model="snackbar.show" :timeout="3000" :right="snackbar.right" :bottom="snackbar.bottom">{{ snackbar.text }}</v-snackbar>
           <input type="file" ref="fileInput" accept=".json" style="display: none" @change="handleImport">
 
-          <v-dialog v-model="showDiffDialog" max-width="800" scrollable>
+          <v-dialog v-model="showDiffDialog" max-width="1000px" width="60%" scrollable>
               <v-card>
                   <v-toolbar color="deep-purple" flat>
                       <v-toolbar-title>Settings Changes Preview</v-toolbar-title>
                       <v-spacer></v-spacer>
                       <v-btn icon @click="cancelImport()"><v-icon>mdi-close</v-icon></v-btn>
                   </v-toolbar>
-                  <v-card-text style="max-height: 500px;">
+                  <v-card-text style="max-height: 85vh;">
                       <p class="body-2 grey--text mt-4 mb-4">The following settings will be changed:</p>
                       <v-simple-table dense>
                           <template v-slot:default>
+                              <template v-if="groupedChanges.settings.length > 0">
+                                  <thead><tr><th colspan="3" class="blue--text subtitle-1">Settings changes</th></tr></thead>
+                                  <tbody>
+                                      <tr v-for="(change, index) in groupedChanges.settings" :key="'settings-' + index">
+                                          <td class="caption" style="width: 30%;">
+                                            <v-tooltip bottom>
+                                              <template v-slot:activator="{ on, attrs }">
+                                                <span v-bind="attrs" v-on="on">{{ formatSettingPath(change.setting) }}</span>
+                                              </template>
+                                              <span>{{ change.setting }}</span>
+                                            </v-tooltip>
+                                          </td>
+                                          <td class="caption grey--text text--lighten-1" style="width: 40%;">
+                                              <div class="d-flex align-center justify-center flex-wrap" style="width: 100%;">
+                                                <span class="text-right" :style="{ fontFamily: typeof change.oldValue === 'number' ? 'monospace' : 'inherit', wordBreak: 'break-word', maxWidth: '45%' }">{{ formatValue(change.oldValue) }}</span>
+                                                <v-icon small class="mx-1">mdi-arrow-right</v-icon>
+                                                <span class="text-left" :style="{ fontFamily: typeof change.newValue === 'number' ? 'monospace' : 'inherit', wordBreak: 'break-word', maxWidth: '45%' }">{{ formatValue(change.newValue) }}</span>
+                                              </div>
+                                          </td>
+                                          <td class="text-no-wrap text-right caption" style="width: 30%;">
+                                              <span v-if="typeof change.newValue === 'boolean'" style="font-weight: 500;">{{ change.newValue ? 'Now enabled' : 'Now disabled' }}</span>
+                                              <span v-if="change.isPercentChange && change.percentChange !== null" style="font-weight: 500; font-family: monospace;">{{ change.percentChange > 0 ? '+' : '' }}{{ change.percentChange.toFixed(1) }}%</span>
+                                          </td>
+                                      </tr>
+                                  </tbody>
+                              </template>
                               <template v-if="groupedChanges.good.length > 0">
-                                  <thead><tr><th colspan="3" class="green--text subtitle-1">Good outcome changes</th></tr></thead>
+                                  <thead><tr><th colspan="3" class="green--text subtitle-1 pt-4">Good outcome changes</th></tr></thead>
                                   <tbody>
                                       <tr v-for="(change, index) in groupedChanges.good" :key="'good-' + index">
-                                          <td class="caption" style="width: 33.33%;">
+                                          <td class="caption" style="width: 30%;">
                                             <v-tooltip bottom>
                                               <template v-slot:activator="{ on, attrs }">
                                                 <span v-bind="attrs" v-on="on">{{ formatSettingPath(change.setting) }}</span>
@@ -1023,23 +1141,25 @@ const MiscView = Vue.component("ti-misc", {
                                               <span>{{ change.outcomeType || 'Good Outcome' }}</span>
                                             </v-tooltip>
                                           </td>
-                                          <td class="text-no-wrap text-right caption grey--text text--lighten-1" style="width: 33.33%; font-family: monospace !important;">
-                                              <span style="display: inline-block; width: 80px; text-align: right;">{{ formatValue(change.oldValue) }}</span>
-                                              <span class="mx-2">→</span>
-                                              <span style="display: inline-block; width: 80px; text-align: left;">{{ formatValue(change.newValue) }}</span>
+                                          <td class="caption grey--text text--lighten-1" style="width: 40%;">
+                                              <div class="d-flex align-center justify-center flex-wrap" style="width: 100%;">
+                                                <span class="text-right" :style="{ fontFamily: typeof change.oldValue === 'number' ? 'monospace' : 'inherit', wordBreak: 'break-word', maxWidth: '45%' }">{{ formatValue(change.oldValue) }}</span>
+                                                <v-icon small class="mx-1">mdi-arrow-right</v-icon>
+                                                <span class="text-left" :style="{ fontFamily: typeof change.newValue === 'number' ? 'monospace' : 'inherit', wordBreak: 'break-word', maxWidth: '45%' }">{{ formatValue(change.newValue) }}</span>
+                                              </div>
                                           </td>
-                                          <td class="text-no-wrap text-right caption" style="width: 33.33%; font-family: monospace !important;">
+                                          <td class="text-no-wrap text-right caption" style="width: 30%;">
                                               <span v-if="typeof change.newValue === 'boolean'" :class="getDiffClass(change, change.newValue)" style="font-weight: 500;">{{ change.newValue ? 'Now enabled' : 'Now disabled' }}</span>
-                                              <span v-if="change.isPercentChange && change.percentChange !== null" :class="getDiffClass(change)" style="font-weight: 500;">{{ change.percentChange > 0 ? '+' : '' }}{{ change.percentChange.toFixed(1) }}%</span>
+                                              <span v-if="change.isPercentChange && change.percentChange !== null" :class="getDiffClass(change)" style="font-weight: 500; font-family: monospace;">{{ change.percentChange > 0 ? '+' : '' }}{{ change.percentChange.toFixed(1) }}%</span>
                                           </td>
                                       </tr>
                                   </tbody>
                               </template>
                               <template v-if="groupedChanges.bad.length > 0">
-                                  <thead><tr><th colspan="3" class="red--text subtitle-1 pt-6">Bad outcome changes</th></tr></thead>
+                                  <thead><tr><th colspan="3" class="red--text subtitle-1 pt-4">Bad outcome changes</th></tr></thead>
                                   <tbody>
                                       <tr v-for="(change, index) in groupedChanges.bad" :key="'bad-' + index">
-                                          <td class="caption" style="width: 33.33%;">
+                                          <td class="caption" style="width: 30%;">
                                             <v-tooltip bottom>
                                               <template v-slot:activator="{ on, attrs }">
                                                 <span v-bind="attrs" v-on="on">{{ formatSettingPath(change.setting) }}</span>
@@ -1047,14 +1167,16 @@ const MiscView = Vue.component("ti-misc", {
                                               <span>{{ change.outcomeType || 'Bad Outcome' }}</span>
                                             </v-tooltip>
                                           </td>
-                                          <td class="text-no-wrap text-right caption grey--text text--lighten-1" style="width: 33.33%; font-family: monospace !important;">
-                                              <span style="display: inline-block; width: 80px; text-align: right;">{{ formatValue(change.oldValue) }}</span>
-                                              <span class="mx-2">→</span>
-                                              <span style="display: inline-block; width: 80px; text-align: left;">{{ formatValue(change.newValue) }}</span>
+                                          <td class="caption grey--text text--lighten-1" style="width: 40%;">
+                                              <div class="d-flex align-center justify-center flex-wrap" style="width: 100%;">
+                                                <span class="text-right" :style="{ fontFamily: typeof change.oldValue === 'number' ? 'monospace' : 'inherit', wordBreak: 'break-word', maxWidth: '45%' }">{{ formatValue(change.oldValue) }}</span>
+                                                <v-icon small class="mx-1">mdi-arrow-right</v-icon>
+                                                <span class="text-left" :style="{ fontFamily: typeof change.newValue === 'number' ? 'monospace' : 'inherit', wordBreak: 'break-word', maxWidth: '45%' }">{{ formatValue(change.newValue) }}</span>
+                                              </div>
                                           </td>
-                                          <td class="text-no-wrap text-right caption" style="width: 33.33%; font-family: monospace !important;">
+                                          <td class="text-no-wrap text-right caption" style="width: 30%;">
                                               <span v-if="typeof change.newValue === 'boolean'" :class="getDiffClass(change, change.newValue)" style="font-weight: 500;">{{ change.newValue ? 'Now enabled' : 'Now disabled' }}</span>
-                                              <span v-if="change.isPercentChange && change.percentChange !== null" :class="getDiffClass(change)" style="font-weight: 500;">{{ change.percentChange > 0 ? '+' : '' }}{{ change.percentChange.toFixed(1) }}%</span>
+                                              <span v-if="change.isPercentChange && change.percentChange !== null" :class="getDiffClass(change)" style="font-weight: 500; font-family: monospace;">{{ change.percentChange > 0 ? '+' : '' }}{{ change.percentChange.toFixed(1) }}%</span>
                                           </td>
                                       </tr>
                                   </tbody>
