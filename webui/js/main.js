@@ -957,6 +957,8 @@ const MiscView = Vue.component("ti-misc", {
       return parts.map(formatPart).join(" → ");
     },
     getDiffClass(change, value) {
+      if (change.classification === "settings" || change.classification === "neutral") return "";
+
       const val = value !== undefined ? value : change.newValue;
 
       if (typeof val === "boolean") {
