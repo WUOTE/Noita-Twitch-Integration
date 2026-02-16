@@ -957,9 +957,6 @@ const MiscView = Vue.component("ti-misc", {
       return parts.map(formatPart).join(" → ");
     },
     getDiffClass(change, value) {
-      if (change.isNew) return "blue--text";
-      if (change.isRemoved) return "orange--text";
-
       const val = value !== undefined ? value : change.newValue;
 
       if (typeof val === "boolean") {
@@ -968,8 +965,7 @@ const MiscView = Vue.component("ti-misc", {
         } else if (change.classification === "bad") {
           return val ? "red--text" : "green--text";
         } else {
-          // Settings / Neutral
-          return val ? "green--text" : "orange--text";
+          return val ? "green--text" : "red--text";
         }
       }
 
@@ -980,8 +976,7 @@ const MiscView = Vue.component("ti-misc", {
         } else if (change.classification === "good") {
           return isPositive ? "green--text" : "red--text";
         } else {
-          // Settings / Neutral
-          return isPositive ? "green--text" : "orange--text";
+          return isPositive ? "green--text" : "red--text";
         }
       }
       return "";
@@ -1123,8 +1118,8 @@ const MiscView = Vue.component("ti-misc", {
                                               </div>
                                           </td>
                                           <td class="text-no-wrap text-right caption" style="width: 30%;">
-                                              <span v-if="typeof change.newValue === 'boolean'" style="font-weight: 500;">{{ change.newValue ? 'Now enabled' : 'Now disabled' }}</span>
-                                              <span v-if="change.isPercentChange && change.percentChange !== null" style="font-weight: 500; font-family: monospace;">{{ change.percentChange > 0 ? '+' : '' }}{{ change.percentChange.toFixed(1) }}%</span>
+                                              <span v-if="typeof change.newValue === 'boolean'" :class="getDiffClass(change, change.newValue)" style="font-weight: 500;">{{ change.newValue ? 'Now enabled' : 'Now disabled' }}</span>
+                                              <span v-if="change.isPercentChange && change.percentChange !== null" :class="getDiffClass(change)" style="font-weight: 500; font-family: monospace;">{{ change.percentChange > 0 ? '+' : '' }}{{ change.percentChange.toFixed(1) }}%</span>
                                           </td>
                                       </tr>
                                   </tbody>
@@ -1183,7 +1178,7 @@ const MiscView = Vue.component("ti-misc", {
                               </template>
                           </template>
                       </v-simple-table>
-                      <p class="caption mt-4"><span class="green--text">Green</span> = good state/change, <span class="red--text">Red</span> = bad state/change, <span class="blue--text">Blue</span> = new, <span class="orange--text">Orange</span> = removed</p>        
+                      <p class="caption mt-4"><span class="green--text">Green</span> = beneficial change, <span class="red--text">Red</span> = detrimental change</p>
                   </v-card-text>
                   <v-card-actions>
                       <v-spacer></v-spacer>
